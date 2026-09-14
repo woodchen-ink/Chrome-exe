@@ -6,6 +6,12 @@ name: Sync Chrome Stable
 #   2. 仅从 Google 官方域名下载离线安装包，并校验 SHA256 与文件大小；
 #   3. 7z 解出 chrome.7z → Chrome-bin/，重新打包为 Chrome-bin.zip，附带 .sha256 发布为 Release（tag = 版本号）。
 # 二进制完全来自 Google，第三方仓库只提供"版本号 + 官方链接 + 校验值"元数据。
+#
+# 随后 manifest 任务更新 cores.json（CZL Browser 客户端运行时拉取的内核清单）：
+#   - chrome-stable：本仓库最新的 Chrome-bin.zip Release
+#   - clearcote：clearcotelabs/clearcote-browser 最新含 Windows 构建的 Release
+#     （上游 releases/latest 指向 SDK 发布 sdk-v*，浏览器构建均为 pre-release，不能取 latest）
+# 正则统一用 [.] 而非 \. 转义，避免不同 shell 下反斜杠被吞。
 on:
   schedule:
     - cron: '0 1 * * *' # 每天 UTC 01:00（北京时间 09:00）
@@ -159,3 +165,120 @@ jobs:
             gh release create "$VERSION" out/Chrome-bin.zip out/Chrome-bin.zip.sha256 \
               --title "$VERSION" --notes "$notes" --latest --repo "$GITHUB_REPOSITORY"
           fi
+
+  manifest:
+    needs: sync
+    # Chrome 同步失败时仍更新 clearcote 条目
+    if: always()
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Update cores.json
+        id: update
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          manifest=cores.json
+          summary=()
+          failed=false
+
+          # update_entry <id> <owner/repo> <资产名正则> <版本来源：tag，或从资产名提取版本的 sed 表达式>
+          update_entry() {
+            local id=$1 repo=$2 asset_regex=$3 version_from=$4
+            local releases release tag asset name url version sha_url sha256 current_release current_sha tmp
+
+            releases=$(gh api "repos/${repo}/releases?per_page=30")
+            release=$(jq -c --arg re "$asset_regex" \
+              '[.[] | select(.draft | not) | select(any(.assets[]; .name | test($re)))][0]' <<<"$releases")
+            if [ -z "$release" ] || [ "$release" = "null" ]; then
+              echo "::error::${repo} 没有找到匹配 ${asset_regex} 的 Release"
+              return 1
+            fi
+
+            tag=$(jq -r '.tag_name' <<<"$release")
+            asset=$(jq -c --arg re "$asset_regex" '[.assets[] | select(.name | test($re))][0]' <<<"$release")
+            name=$(jq -r '.name' <<<"$asset")
+            url=$(jq -r '.browser_download_url' <<<"$asset")
+            if [ "$version_from" = "tag" ]; then
+              version=$tag
+            else
+              version=$(sed -E "$version_from" <<<"$name")
+            fi
+            if ! grep -Eq '^[0-9]+([.][0-9]+){3}$' <<<"$version"; then
+              echo "::error::${id} 版本号格式无效: ${version}"
+              return 1
+            fi
+
+            sha_url=$(jq -r --arg n "${name}.sha256" '[.assets[] | select(.name == $n)][0].browser_download_url // empty' <<<"$release")
+            if [ -z "$sha_url" ]; then
+              echo "::error::${repo} ${tag} 缺少 ${name}.sha256，拒绝更新 ${id}"
+              return 1
+            fi
+            sha256=$(curl -fsSL "$sha_url" | awk '{print tolower($1)}')
+            if ! grep -Eq '^[0-9a-f]{64}$' <<<"$sha256"; then
+              echo "::error::${id} SHA256 格式无效: ${sha256}"
+              return 1
+            fi
+
+            current_release=$(jq -r --arg id "$id" '.cores[] | select(.id == $id) | .release // ""' "$manifest")
+            current_sha=$(jq -r --arg id "$id" '.cores[] | select(.id == $id) | .sha256' "$manifest")
+            echo "${id} 上游: ${tag} / ${version} / ${sha256}"
+            echo "${id} 当前: ${current_release} / ${current_sha}"
+            if [ "$tag" = "$current_release" ] && [ "$sha256" = "$current_sha" ]; then
+              return 0
+            fi
+
+            tmp=$(mktemp)
+            jq --arg id "$id" --arg tag "$tag" --arg version "$version" --arg url "$url" --arg sha "$sha256" '
+              .cores |= map(
+                if .id == $id
+                then .version = $version | .release = $tag | .downloadUrl = $url | .sha256 = $sha
+                else . end)
+            ' "$manifest" > "$tmp"
+            mv "$tmp" "$manifest"
+            summary+=("${id} ${version} (${tag})")
+          }
+
+          # 各内核互不影响：一个上游异常时仍更新其余条目，最后再以失败状态结束
+          update_entry clearcote clearcotelabs/clearcote-browser \
+            '^clearcote-[0-9.]+-windows-x64[.]zip$' 's/^clearcote-([0-9.]+)-windows-x64[.]zip$/\1/' || failed=true
+          update_entry chrome-stable "$GITHUB_REPOSITORY" \
+            '^Chrome-bin[.]zip$' tag || failed=true
+
+          if [ ${#summary[@]} -eq 0 ]; then
+            echo "内核清单已是最新"
+            echo "changed=false" >> "$GITHUB_OUTPUT"
+          else
+            git diff
+            summary_text=$(printf '%s, ' "${summary[@]}")
+            {
+              echo "changed=true"
+              echo "summary=${summary_text%, }"
+            } >> "$GITHUB_OUTPUT"
+          fi
+          echo "failed=${failed}" >> "$GITHUB_OUTPUT"
+
+      - name: Commit manifest
+        if: steps.update.outputs.changed == 'true'
+        env:
+          SUMMARY: ${{ steps.update.outputs.summary }}
+        run: |
+          set -euo pipefail
+          jq -e '.cores | length > 0' cores.json >/dev/null
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add cores.json
+          git commit -m "chore: 更新内核清单 ${SUMMARY}"
+          git pull --rebase origin main
+          git push origin HEAD:main
+          # jsDelivr 分支缓存约 12 小时，主动刷新让国内用户尽快拿到新清单（失败不影响）
+          curl -fsS "https://purge.jsdelivr.net/gh/${GITHUB_REPOSITORY}@main/cores.json" || true
+
+      - name: Report upstream errors
+        if: steps.update.outputs.failed == 'true'
+        run: |
+          echo "::error::部分内核上游检查失败，详见 Update cores.json 步骤日志"
+          exit 1
