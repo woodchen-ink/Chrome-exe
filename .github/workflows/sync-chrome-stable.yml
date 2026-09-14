@@ -1,0 +1,161 @@
+name: Sync Chrome Stable
+
+# 定时同步 Google Chrome 稳定版（Windows x64）并重新打包为便携 zip：
+#   1. 读取 Bush2021/chrome_installer 的 data.json（其 Actions 定期向 Google 更新服务器查询），
+#      拿到最新稳定版版本号、官方下载地址与 Google 返回的 SHA256；
+#   2. 仅从 Google 官方域名下载离线安装包，并校验 SHA256 与文件大小；
+#   3. 7z 解出 chrome.7z → Chrome-bin/，重新打包为 Chrome-bin.zip，附带 .sha256 发布为 Release（tag = 版本号）。
+# 二进制完全来自 Google，第三方仓库只提供"版本号 + 官方链接 + 校验值"元数据。
+on:
+  schedule:
+    - cron: '0 1 * * *' # 每天 UTC 01:00（北京时间 09:00）
+  workflow_dispatch:
+    inputs:
+      force:
+        description: '即使同版本 Release 已存在也重新打包发布'
+        type: boolean
+        default: false
+
+permissions:
+  contents: write
+
+concurrency:
+  group: sync-chrome-stable
+  cancel-in-progress: false
+
+jobs:
+  sync:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Resolve latest stable
+        id: meta
+        env:
+          GH_TOKEN: ${{ github.token }}
+          FORCE: ${{ inputs.force || false }}
+        run: |
+          set -euo pipefail
+          data=$(curl -fsSL https://raw.githubusercontent.com/Bush2021/chrome_installer/main/data.json)
+          entry=$(jq -c '.win_stable_x64' <<<"$data")
+          version=$(jq -r '.version' <<<"$entry")
+          sha256=$(jq -r '.sha256 | ascii_downcase' <<<"$entry")
+          size=$(jq -r '.size' <<<"$entry")
+
+          if ! grep -Eq '^[0-9]+([.][0-9]+){3}$' <<<"$version"; then
+            echo "::error::版本号格式无效: ${version}"
+            exit 1
+          fi
+          if ! grep -Eq '^[0-9a-f]{64}$' <<<"$sha256"; then
+            echo "::error::SHA256 格式无效: ${sha256}"
+            exit 1
+          fi
+          # 只接受 Google 官方域名的 HTTPS 地址
+          urls=$(jq -r '.urls[] | select(test("^https://(dl[.]google[.]com|edgedl[.]me[.]gvt1[.]com|www[.]google[.]com)/"))' <<<"$entry")
+          if [ -z "$urls" ]; then
+            echo "::error::未找到 Google 官方 HTTPS 下载地址"
+            exit 1
+          fi
+
+          skip=false
+          if gh release view "$version" --repo "$GITHUB_REPOSITORY" >/dev/null 2>&1 && [ "$FORCE" != "true" ]; then
+            echo "Release ${version} 已存在，跳过"
+            skip=true
+          fi
+
+          echo "最新稳定版: ${version} (${size} bytes, sha256 ${sha256})"
+          {
+            echo "skip=${skip}"
+            echo "version=${version}"
+            echo "sha256=${sha256}"
+            echo "size=${size}"
+            echo "urls<<EOF"
+            echo "$urls"
+            echo "EOF"
+          } >> "$GITHUB_OUTPUT"
+
+      - name: Download official installer
+        if: steps.meta.outputs.skip != 'true'
+        env:
+          URLS: ${{ steps.meta.outputs.urls }}
+          SHA256: ${{ steps.meta.outputs.sha256 }}
+          SIZE: ${{ steps.meta.outputs.size }}
+        run: |
+          set -euo pipefail
+          ok=false
+          while IFS= read -r url; do
+            [ -z "$url" ] && continue
+            echo "下载: ${url}"
+            if curl -fL --retry 3 --retry-delay 5 -sS -o installer.exe "$url"; then
+              actual_sha=$(sha256sum installer.exe | awk '{print $1}')
+              actual_size=$(stat -c %s installer.exe)
+              if [ "$actual_sha" = "$SHA256" ] && [ "$actual_size" = "$SIZE" ]; then
+                ok=true
+                break
+              fi
+              echo "::warning::校验不一致 sha=${actual_sha} size=${actual_size}，尝试下一个地址"
+            fi
+          done <<<"$URLS"
+          if [ "$ok" != "true" ]; then
+            echo "::error::所有官方地址均下载或校验失败"
+            exit 1
+          fi
+
+      - name: Extract and repackage
+        if: steps.meta.outputs.skip != 'true'
+        env:
+          VERSION: ${{ steps.meta.outputs.version }}
+        run: |
+          set -euo pipefail
+          mkdir -p work out
+          # 7z 退出码 1 表示仅有警告（安装包 PE 结构会触发），视为成功
+          extract() {
+            local rc=0
+            7z x -y -owork "$1" >/dev/null || rc=$?
+            if [ "$rc" -gt 1 ]; then
+              echo "::error::7z 解压 $1 失败，退出码 ${rc}"
+              exit 1
+            fi
+          }
+          extract installer.exe
+          # 新版 7-Zip 直接解出 Chrome-bin/；旧版 p7zip 只解出内嵌的 chrome.7z，需要再解一层
+          if [ ! -d work/Chrome-bin ] && [ -f work/chrome.7z ]; then
+            extract work/chrome.7z
+          fi
+          if [ ! -f work/Chrome-bin/chrome.exe ]; then
+            echo "::error::解压后未找到 Chrome-bin/chrome.exe"
+            find work -maxdepth 2 | head -20
+            exit 1
+          fi
+          test -f "work/Chrome-bin/${VERSION}/chrome.dll"
+
+          (cd work && zip -r -q -9 ../out/Chrome-bin.zip Chrome-bin)
+          (cd out && sha256sum Chrome-bin.zip > Chrome-bin.zip.sha256)
+          ls -la out
+          cat out/Chrome-bin.zip.sha256
+
+      - name: Publish release
+        if: steps.meta.outputs.skip != 'true'
+        env:
+          GH_TOKEN: ${{ github.token }}
+          VERSION: ${{ steps.meta.outputs.version }}
+          INSTALLER_SHA256: ${{ steps.meta.outputs.sha256 }}
+        run: |
+          set -euo pipefail
+          zip_sha=$(awk '{print $1}' out/Chrome-bin.zip.sha256)
+          notes=$(cat <<EOF
+          Google Chrome Stable ${VERSION}（Windows x64）便携版，由 GitHub Actions 自动打包。
+
+          - 来源：Google 官方离线安装包（dl.google.com），元数据来自 [Bush2021/chrome_installer](https://github.com/Bush2021/chrome_installer)
+          - 安装包 SHA256：\`${INSTALLER_SHA256}\`
+          - Chrome-bin.zip SHA256：\`${zip_sha}\`
+          EOF
+          )
+          if gh release view "$VERSION" --repo "$GITHUB_REPOSITORY" >/dev/null 2>&1; then
+            gh release upload "$VERSION" out/Chrome-bin.zip out/Chrome-bin.zip.sha256 --clobber --repo "$GITHUB_REPOSITORY"
+            gh release edit "$VERSION" --notes "$notes" --latest --repo "$GITHUB_REPOSITORY"
+          else
+            gh release create "$VERSION" out/Chrome-bin.zip out/Chrome-bin.zip.sha256 \
+              --title "$VERSION" --notes "$notes" --latest --repo "$GITHUB_REPOSITORY"
+          fi
