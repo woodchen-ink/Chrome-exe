@@ -45,7 +45,9 @@ jobs:
         run: |
           set -euo pipefail
           # Omaha 协议：appid 为 Chrome，ap=x64-stable-multi-chrome 即 Win x64 稳定版
-          resp=$(curl -fsSL --retry 3 --retry-delay 5 -X POST https://tools.google.com/service/update2             -H 'Content-Type: application/xml'             --data '<?xml version="1.0" encoding="UTF-8"?><request protocol="3.0" updater="Omaha" ismachine="1" installsource="ondemandcheckforupdate"><os platform="win" version="10.0" arch="x64"/><app appid="{8A69D345-D564-463C-AFF1-A69D9E530F96}" ap="x64-stable-multi-chrome"><updatecheck/></app></request>')
+          resp=$(curl -fsSL --retry 3 --retry-delay 5 -X POST https://tools.google.com/service/update2 \
+            -H 'Content-Type: application/xml' \
+            --data '<?xml version="1.0" encoding="UTF-8"?><request protocol="3.0" updater="Omaha" ismachine="1" installsource="ondemandcheckforupdate"><os platform="win" version="10.0" arch="x64"/><app appid="{8A69D345-D564-463C-AFF1-A69D9E530F96}" ap="x64-stable-multi-chrome"><updatecheck/></app></request>')
           entry=$(python3 - "$resp" <<'PY'
           # -*- coding: utf-8 -*-
           import json, sys, xml.etree.ElementTree as ET
