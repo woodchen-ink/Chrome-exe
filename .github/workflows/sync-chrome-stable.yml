@@ -1,11 +1,12 @@
 name: Sync Chrome Stable
 
 # 定时同步 Google Chrome 稳定版（Windows x64）并重新打包为便携 zip：
-#   1. 读取 Bush2021/chrome_installer 的 data.json（其 Actions 定期向 Google 更新服务器查询），
-#      拿到最新稳定版版本号、官方下载地址与 Google 返回的 SHA256；
+#   1. 直接向 Google 更新服务器（Omaha，tools.google.com/service/update2）查询 Win x64 稳定版，
+#      拿到最新稳定版版本号、官方下载地址与 Google 返回的 SHA256/大小；
+#      （原先读取 Bush2021/chrome_installer 的 data.json，该仓库及账号已于 2026-09 下线）
 #   2. 仅从 Google 官方域名下载离线安装包，并校验 SHA256 与文件大小；
 #   3. 7z 解出 chrome.7z → Chrome-bin/，重新打包为 Chrome-bin.zip，附带 .sha256 发布为 Release（tag = 版本号）。
-# 二进制完全来自 Google，第三方仓库只提供"版本号 + 官方链接 + 校验值"元数据。
+# 二进制与元数据完全来自 Google，不依赖第三方仓库。
 #
 # 随后 manifest 任务更新 cores.json（CZL Browser 客户端运行时拉取的内核清单）：
 #   - chrome-stable：本仓库最新的 Chrome-bin.zip Release
@@ -43,11 +44,32 @@ jobs:
           FORCE: ${{ inputs.force || false }}
         run: |
           set -euo pipefail
-          data=$(curl -fsSL https://raw.githubusercontent.com/Bush2021/chrome_installer/main/data.json)
-          entry=$(jq -c '.win_stable_x64' <<<"$data")
+          # Omaha 协议：appid 为 Chrome，ap=x64-stable-multi-chrome 即 Win x64 稳定版
+          resp=$(curl -fsSL --retry 3 --retry-delay 5 -X POST https://tools.google.com/service/update2             -H 'Content-Type: application/xml'             --data '<?xml version="1.0" encoding="UTF-8"?><request protocol="3.0" updater="Omaha" ismachine="1" installsource="ondemandcheckforupdate"><os platform="win" version="10.0" arch="x64"/><app appid="{8A69D345-D564-463C-AFF1-A69D9E530F96}" ap="x64-stable-multi-chrome"><updatecheck/></app></request>')
+          entry=$(python3 - "$resp" <<'PY'
+          # -*- coding: utf-8 -*-
+          import json, sys, xml.etree.ElementTree as ET
+          root = ET.fromstring(sys.argv[1])
+          uc = root.find('./app/updatecheck')
+          if uc is None or uc.get('status') != 'ok':
+              sys.exit('updatecheck 状态异常: %s' % (None if uc is None else uc.get('status')))
+          pkg = uc.find('./manifest/packages/package')
+          name = pkg.get('name')
+          print(json.dumps({
+              'version': uc.find('./manifest').get('version'),
+              'sha256': pkg.get('hash_sha256', ''),
+              'size': pkg.get('size', ''),
+              'urls': [u.get('codebase') + name for u in uc.findall('./urls/url')],
+          }))
+          PY
+          )
           version=$(jq -r '.version' <<<"$entry")
           sha256=$(jq -r '.sha256 | ascii_downcase' <<<"$entry")
           size=$(jq -r '.size' <<<"$entry")
+          if ! grep -Eq '^[0-9]+$' <<<"$size"; then
+            echo "::error::文件大小无效: ${size}"
+            exit 1
+          fi
 
           if ! grep -Eq '^[0-9]+([.][0-9]+){3}$' <<<"$version"; then
             echo "::error::版本号格式无效: ${version}"
@@ -153,7 +175,7 @@ jobs:
           notes=$(cat <<EOF
           Google Chrome Stable ${VERSION}（Windows x64）便携版，由 GitHub Actions 自动打包。
 
-          - 来源：Google 官方离线安装包（dl.google.com），元数据来自 [Bush2021/chrome_installer](https://github.com/Bush2021/chrome_installer)
+          - 来源：Google 官方离线安装包（dl.google.com），版本与校验值来自 Google 更新服务器
           - 安装包 SHA256：\`${INSTALLER_SHA256}\`
           - Chrome-bin.zip SHA256：\`${zip_sha}\`
           EOF
