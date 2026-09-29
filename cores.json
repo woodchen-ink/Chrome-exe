@@ -3,12 +3,12 @@
     {
       "id": "clearcote",
       "name": "Clearcote",
-      "version": "149.0.7827.114",
+      "version": "150.0.7871.114",
       "kind": "clearcote",
-      "release": "v0.1.0-pre.22",
+      "release": "v0.1.0-pre.23",
       "description": "开源指纹 Chromium（BSD-3），引擎级指纹与时区，iframe/Worker/弹窗一致生效，推荐使用",
-      "downloadUrl": "https://github.com/clearcotelabs/clearcote-browser/releases/download/v0.1.0-pre.22/clearcote-149.0.7827.114-windows-x64.zip",
-      "sha256": "f40c83049aae13d8c0322e9822eeb2d7236fddd5e7915304eb6f0f5f1f79fcb6"
+      "downloadUrl": "https://github.com/clearcotelabs/clearcote-browser/releases/download/v0.1.0-pre.23/clearcote-150.0.7871.114-windows-x64.zip",
+      "sha256": "93fc03c45b931d8d82f714814318892929f44dd671b0993788332071d53f3135"
     },
     {
       "id": "chrome-stable",
