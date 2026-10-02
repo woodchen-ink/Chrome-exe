@@ -13,12 +13,12 @@
     {
       "id": "chrome-stable",
       "name": "Chrome",
-      "version": "154.0.8037.93",
+      "version": "154.0.8037.98",
       "kind": "chrome",
-      "release": "154.0.8037.93",
+      "release": "154.0.8037.98",
       "description": "Google Chrome 稳定版（官方安装包重新打包，每日自动同步），TLS 完全真实；不支持指纹开关，时区通过 CDP 注入",
-      "downloadUrl": "https://github.com/woodchen-ink/Chrome-exe/releases/download/154.0.8037.93/Chrome-bin.zip",
-      "sha256": "d7b9812620a3c942353534f20d1035bb731e2106e90ed9c6cc863cb69eea24ba"
+      "downloadUrl": "https://github.com/woodchen-ink/Chrome-exe/releases/download/154.0.8037.98/Chrome-bin.zip",
+      "sha256": "23cb7055733f07e46a2d92aca7f843350960804354aee926f37a32255c4aff02"
     }
   ]
 }
